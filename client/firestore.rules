@@ -1,0 +1,217 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidEmail(email) {
+      return email.matches('^[^@]+@[^@]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // ============================================
+    // USERS COLLECTION
+    // ============================================
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId);
+      
+      // Prevent privilege escalation: users cannot modify billing/admin fields
+      allow update: if isOwner(userId)
+                    && (!request.resource.data.diff(resource.data).affectedKeys()
+                        .hasAny(['plan', 'subscriptionStatus', 'operatorSuiteStatus', 'role']));
+    }
+
+    // ============================================
+    // BOOKINGS COLLECTION
+    // ============================================
+    match /bookings/{bookingId} {
+      // Users can read their own bookings
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
+      
+      // Authenticated users can create bookings
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.keys().hasAll(['fullName', 'email', 'plan', 'status'])
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.plan in ['CORE', 'PRIME', 'APEX']
+                    && isValidEmail(request.resource.data.email);
+
+      // Users can update their own bookings (for profile editing)
+      // Cannot change: userId, email, plan, or status
+      allow update: if isAuthenticated()
+                    && resource.data.userId == request.auth.uid
+                    && request.resource.data.userId == resource.data.userId
+                    && request.resource.data.email == resource.data.email
+                    && request.resource.data.plan == resource.data.plan
+                    && request.resource.data.status == resource.data.status;
+    }
+
+    // ============================================
+    // CONTACTS COLLECTION (Public submission)
+    // ============================================
+    match /contacts/{contactId} {
+      // Only admins via backend SDK should read contacts
+      allow read: if false;
+      
+      // Anyone can submit a contact form (no auth required)
+      allow create: if request.resource.data.keys().hasAll(['name', 'email', 'subject', 'message'])
+                    && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 100
+                    && isValidEmail(request.resource.data.email)
+                    && request.resource.data.subject.size() >= 5 && request.resource.data.subject.size() <= 200
+                    && request.resource.data.message.size() >= 20 && request.resource.data.message.size() <= 5000;
+    }
+
+    // ============================================
+    // QUERIES COLLECTION (User Dashboard)
+    // ============================================
+    match /queries/{queryId} {
+      // Users can read their own queries
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid);
+      
+      // Authenticated users can create queries
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.keys().hasAll(['customerName', 'email', 'subject', 'queryDetails', 'status'])
+                    && request.resource.data.subject.size() >= 5 && request.resource.data.subject.size() <= 200
+                    && request.resource.data.queryDetails.size() >= 20 && request.resource.data.queryDetails.size() <= 5000
+                    && isValidEmail(request.resource.data.email)
+                    && request.resource.data.status == 'open';
+
+      // Users cannot modify their own queries (admin only)
+      allow update: if false;
+    }
+
+    // ============================================
+    // CALIBRATION REQUESTS COLLECTION
+    // ============================================
+    match /calibration_requests/{requestId} {
+      // Only admins via backend SDK should read calibration requests
+      allow read: if false;
+
+      // Authenticated users can submit calibration requests
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.keys().hasAll(['userId', 'userName', 'email', 'message', 'status'])
+                    && isValidEmail(request.resource.data.email)
+                    && request.resource.data.message.size() >= 20 && request.resource.data.message.size() <= 5000
+                    && request.resource.data.status == 'pending';
+
+      // Users cannot modify requests (admin only)
+      allow update: if false;
+    }
+
+    // ============================================
+    // COOKIE PREFERENCES — AUTHENTICATED USERS
+    // ============================================
+    match /cookie_preferences_users/{userId} {
+      // Users can read their own cookie preferences
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+
+      // Users can create their own cookie preferences
+      allow create: if isAuthenticated()
+                    && request.auth.uid == userId
+                    && request.resource.data.necessary == true;
+
+      // Users can update their own cookie preferences
+      allow update: if isAuthenticated()
+                    && request.auth.uid == userId
+                    && request.resource.data.necessary == true;
+    }
+
+    // ============================================
+    // COOKIE PREFERENCES — ANONYMOUS USERS
+    // ============================================
+    match /cookie_preferences_anonymous/{anonymousId} {
+      // Anyone can read their own cookie preferences (by anonymousId)
+      allow read: if true;
+
+      // Anyone can create cookie preferences
+      allow create: if request.resource.data.keys().hasAll(['anonymousId', 'necessary', 'analytics', 'marketing'])
+                    && request.resource.data.necessary == true
+                    && request.resource.data.anonymousId == anonymousId;
+
+      // Anyone can update their own cookie preferences
+      allow update: if request.resource.data.necessary == true
+                    && request.resource.data.anonymousId == anonymousId;
+    }
+
+    // ============================================
+    // OPERATOR METRICS (Dashboard Data)
+    // ============================================
+    match /operator_metrics/{metricId} {
+      // Users can read their own operator metrics
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+
+      // Users can create their own operator metrics (initialization)
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid;
+
+      // Users can update their own operator metrics
+      allow update: if isAuthenticated()
+                    && resource.data.userId == request.auth.uid;
+    }
+
+    // ============================================
+    // DAILY OUTPUTS (Per-User Daily Tracking)
+    // ============================================
+    match /daily_outputs/{outputId} {
+      // Users can read their own daily outputs
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+
+      // Users can create their own daily outputs (initialization/seeding)
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid;
+
+      // Users can update their own daily outputs
+      allow update: if isAuthenticated()
+                    && resource.data.userId == request.auth.uid;
+    }
+
+    // ============================================
+    // PAYMENTS (Dodo Payments Integration)
+    // ============================================
+    match /payments/{paymentId} {
+      // Users can read their own payment records
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+
+      // Authenticated users can create payment records
+      allow create: if isAuthenticated()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.keys().hasAll(['userId', 'bookingId', 'plan', 'status', 'customerEmail'])
+                    && request.resource.data.plan in ['CORE', 'PRIME', 'APEX']
+                    && request.resource.data.status == 'pending';
+
+      // Users cannot modify payment records (only webhooks/server can)
+      allow update: if false;
+    }
+
+    // ============================================
+    // SYSTEM HEALTH METRICS
+    // ============================================
+    match /system_health_metrics/{metricId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // ============================================
+    // EFFICIENCY SCORES
+    // ============================================
+    match /operator_efficiency_scores/{scoreId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+  }
+}
